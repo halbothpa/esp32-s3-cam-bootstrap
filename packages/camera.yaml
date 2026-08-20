@@ -1,0 +1,561 @@
+substitutions:
+  device_name: esp32-s3-cam
+  friendly_name: ESP32-S3 Camera
+
+esphome:
+  comment: "GOOUUU/generic ESP32-S3-CAM N16R8 + USB-UART daughterboard"
+  on_boot:
+    priority: -100
+    then:
+      - delay: 2s
+      - lambda: |-
+          if (id(sd_snapshot_component).mount()) {
+            ESP_LOGI("sd", "microSD mounted, size=%llu MB", id(sd_snapshot_component).card_size_mb());
+          } else {
+            ESP_LOGW("sd", "microSD unavailable: %s", id(sd_snapshot_component).last_error().c_str());
+          }
+
+esp32:
+  variant: esp32s3
+  flash_size: 16MB
+  toolchain: platformio
+  framework:
+    type: arduino
+    version: recommended
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+sd_snapshot:
+  id: sd_snapshot_component
+
+logger:
+  level: INFO
+  hardware_uart: UART0
+  baud_rate: 115200
+
+i2c:
+  - id: camera_i2c
+    sda: GPIO4
+    scl: GPIO5
+    scan: false
+    frequency: 200kHz
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+esp32_camera:
+  id: cam
+  name: "${friendly_name}"
+  i2c_id: camera_i2c
+  external_clock:
+    pin: GPIO15
+    frequency: 20MHz
+  data_pins: [GPIO11, GPIO9, GPIO8, GPIO10, GPIO12, GPIO18, GPIO17, GPIO16]
+  vsync_pin: GPIO6
+  href_pin: GPIO7
+  pixel_clock_pin: GPIO13
+  resolution: 640x480
+  jpeg_quality: 12
+  max_framerate: 20 fps
+  idle_framerate: 0.2 fps
+  frame_buffer_count: 2
+  frame_buffer_location: PSRAM
+  pixel_format: JPEG
+  vertical_flip: false
+  horizontal_mirror: false
+  contrast: 0
+  brightness: 0
+  saturation: 0
+  special_effect: none
+  aec_mode: auto
+  aec2: false
+  ae_level: 0
+  aec_value: 300
+  agc_mode: auto
+  agc_value: 0
+  agc_gain_ceiling: 8x
+  wb_mode: auto
+  test_pattern: false
+  on_stream_start:
+    then:
+      - binary_sensor.template.publish:
+          id: camera_streaming
+          state: ON
+  on_stream_stop:
+    then:
+      - binary_sensor.template.publish:
+          id: camera_streaming
+          state: OFF
+  on_image:
+    then:
+      - if:
+          condition:
+            lambda: 'return id(save_next_frame_sd);'
+          then:
+            - lambda: |-
+                id(save_next_frame_sd) = false;
+                char path[96];
+                auto now = id(ha_time).now();
+                if (now.is_valid()) {
+                  snprintf(path, sizeof(path),
+                           "/camera/%04d-%02d-%02d_%02d-%02d-%02d.jpg",
+                           now.year, now.month, now.day_of_month,
+                           now.hour, now.minute, now.second);
+                } else {
+                  snprintf(path, sizeof(path), "/camera/boot_%010lu.jpg",
+                           (unsigned long) (millis() / 1000UL));
+                }
+                if (id(sd_snapshot_component).save_jpeg(image.data, image.length, path)) {
+                  ESP_LOGI("sd", "Saved JPEG %s (%u bytes)", path, (unsigned) image.length);
+                } else {
+                  ESP_LOGE("sd", "JPEG save failed: %s", id(sd_snapshot_component).last_error().c_str());
+                }
+
+esp32_camera_web_server:
+  - port: 8080
+    mode: stream
+  - port: 8081
+    mode: snapshot
+
+globals:
+  - id: save_next_frame_sd
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+output:
+  - platform: ledc
+    id: camera_led_pwm
+    pin: GPIO2
+    channel: 2
+    frequency: 1000Hz
+    zero_means_zero: true
+
+light:
+  - platform: monochromatic
+    id: camera_led
+    name: "Camera LED and Flash"
+    output: camera_led_pwm
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+
+button:
+  - platform: template
+    name: "Snapshot to microSD"
+    icon: mdi:camera-plus
+    on_press:
+      - lambda: |-
+          id(save_next_frame_sd) = true;
+          id(cam).request_image(esphome::camera::API_REQUESTER);
+  - platform: template
+    name: "Mount or Recheck microSD"
+    icon: mdi:sd
+    on_press:
+      - lambda: |-
+          id(sd_snapshot_component).unmount();
+          if (id(sd_snapshot_component).mount()) {
+            ESP_LOGI("sd", "microSD mounted");
+          } else {
+            ESP_LOGW("sd", "microSD unavailable: %s", id(sd_snapshot_component).last_error().c_str());
+          }
+  - platform: restart
+    name: "Restart Camera"
+
+binary_sensor:
+  - platform: gpio
+    id: motion_trigger
+    name: "Motion Trigger GPIO14"
+    device_class: motion
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pulldown: true
+      inverted: false
+    filters:
+      - delayed_on: 75ms
+      - delayed_off: 1s
+    on_press:
+      then:
+        - if:
+            condition:
+              switch.is_on: motion_save_to_sd
+            then:
+              - lambda: |-
+                  id(save_next_frame_sd) = true;
+                  id(cam).request_image(esphome::camera::API_REQUESTER);
+        - if:
+            condition:
+              switch.is_on: motion_flash_enabled
+            then:
+              - light.turn_on:
+                  id: camera_led
+                  brightness: 100%
+              - delay: 500ms
+              - light.turn_off: camera_led
+  - platform: template
+    id: camera_streaming
+    name: "Camera Streaming"
+    entity_category: diagnostic
+
+switch:
+  - platform: template
+    id: motion_save_to_sd
+    name: "Motion -> Save Snapshot to SD"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: mdi:motion-sensor
+  - platform: template
+    id: motion_flash_enabled
+    name: "Motion -> Flash LED"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: mdi:flash
+  - platform: template
+    name: "Camera Vertical Flip"
+    id: camera_vflip
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(cam).set_vertical_flip(true);
+          id(cam).update_camera_parameters();
+    turn_off_action:
+      - lambda: |-
+          id(cam).set_vertical_flip(false);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Horizontal Mirror"
+    id: camera_hmirror
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(cam).set_horizontal_mirror(true);
+          id(cam).update_camera_parameters();
+    turn_off_action:
+      - lambda: |-
+          id(cam).set_horizontal_mirror(false);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Auto Exposure"
+    id: camera_aec_auto
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: |-
+          id(cam).set_aec_mode(esphome::esp32_camera::ESP32_GC_MODE_AUTO);
+          id(cam).update_camera_parameters();
+    turn_off_action:
+      - lambda: |-
+          id(cam).set_aec_mode(esphome::esp32_camera::ESP32_GC_MODE_MANU);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera AEC2 DSP"
+    id: camera_aec2
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(cam).set_aec2(true);
+          id(cam).update_camera_parameters();
+    turn_off_action:
+      - lambda: |-
+          id(cam).set_aec2(false);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Auto Gain"
+    id: camera_agc_auto
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: |-
+          id(cam).set_agc_mode(esphome::esp32_camera::ESP32_GC_MODE_AUTO);
+          id(cam).update_camera_parameters();
+    turn_off_action:
+      - lambda: |-
+          id(cam).set_agc_mode(esphome::esp32_camera::ESP32_GC_MODE_MANU);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Test Pattern"
+    id: camera_test_pattern
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(cam).set_test_pattern(true);
+          id(cam).update_camera_parameters();
+    turn_off_action:
+      - lambda: |-
+          id(cam).set_test_pattern(false);
+          id(cam).update_camera_parameters();
+
+number:
+  - platform: template
+    name: "Camera JPEG Quality"
+    id: camera_jpeg_quality
+    min_value: 6
+    max_value: 63
+    step: 1
+    initial_value: 12
+    optimistic: true
+    restore_value: true
+    mode: slider
+    set_action:
+      - lambda: |-
+          id(cam).set_jpeg_quality((uint8_t) x);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Brightness"
+    min_value: -2
+    max_value: 2
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          id(cam).set_brightness((int) x);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Contrast"
+    min_value: -2
+    max_value: 2
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          id(cam).set_contrast((int) x);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Saturation"
+    min_value: -2
+    max_value: 2
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          id(cam).set_saturation((int) x);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera AE Level"
+    min_value: -2
+    max_value: 2
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          id(cam).set_ae_level((int) x);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Manual Exposure"
+    min_value: 0
+    max_value: 1200
+    step: 10
+    initial_value: 300
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          id(cam).set_aec_value((uint32_t) x);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Manual Gain"
+    min_value: 0
+    max_value: 30
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          id(cam).set_agc_value((uint8_t) x);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Max FPS"
+    min_value: 1
+    max_value: 30
+    step: 1
+    initial_value: 20
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          const float fps = x < 0.1f ? 0.1f : x;
+          id(cam).set_max_update_interval((uint32_t) (1000.0f / fps));
+  - platform: template
+    name: "Camera Idle FPS"
+    min_value: 0.05
+    max_value: 5
+    step: 0.05
+    initial_value: 0.2
+    optimistic: true
+    restore_value: true
+    set_action:
+      - lambda: |-
+          const float fps = x < 0.01f ? 0.01f : x;
+          id(cam).set_idle_update_interval((uint32_t) (1000.0f / fps));
+
+select:
+  - platform: template
+    name: "Camera Resolution"
+    id: camera_resolution
+    optimistic: true
+    restore_value: true
+    initial_option: "640x480"
+    options:
+      - "160x120"
+      - "176x144"
+      - "240x176"
+      - "320x240"
+      - "400x296"
+      - "640x480"
+      - "800x600"
+      - "1024x768"
+      - "1280x1024"
+      - "1600x1200"
+      - "1920x1080"
+      - "2048x1536"
+      - "2560x1440"
+      - "2560x1600"
+      - "2560x1920"
+    set_action:
+      - lambda: |-
+          using namespace esphome::esp32_camera;
+          if      (x == "160x120")   id(cam).set_frame_size(ESP32_CAMERA_SIZE_160X120);
+          else if (x == "176x144")   id(cam).set_frame_size(ESP32_CAMERA_SIZE_176X144);
+          else if (x == "240x176")   id(cam).set_frame_size(ESP32_CAMERA_SIZE_240X176);
+          else if (x == "320x240")   id(cam).set_frame_size(ESP32_CAMERA_SIZE_320X240);
+          else if (x == "400x296")   id(cam).set_frame_size(ESP32_CAMERA_SIZE_400X296);
+          else if (x == "640x480")   id(cam).set_frame_size(ESP32_CAMERA_SIZE_640X480);
+          else if (x == "800x600")   id(cam).set_frame_size(ESP32_CAMERA_SIZE_800X600);
+          else if (x == "1024x768")  id(cam).set_frame_size(ESP32_CAMERA_SIZE_1024X768);
+          else if (x == "1280x1024") id(cam).set_frame_size(ESP32_CAMERA_SIZE_1280X1024);
+          else if (x == "1600x1200") id(cam).set_frame_size(ESP32_CAMERA_SIZE_1600X1200);
+          else if (x == "1920x1080") id(cam).set_frame_size(ESP32_CAMERA_SIZE_1920X1080);
+          else if (x == "2048x1536") id(cam).set_frame_size(ESP32_CAMERA_SIZE_2048X1536);
+          else if (x == "2560x1440") id(cam).set_frame_size(ESP32_CAMERA_SIZE_2560X1440);
+          else if (x == "2560x1600") id(cam).set_frame_size(ESP32_CAMERA_SIZE_2560X1600);
+          else if (x == "2560x1920") id(cam).set_frame_size(ESP32_CAMERA_SIZE_2560X1920);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Effect"
+    optimistic: true
+    restore_value: true
+    initial_option: "None"
+    options: ["None", "Negative", "Grayscale", "Red tint", "Green tint", "Blue tint", "Sepia"]
+    set_action:
+      - lambda: |-
+          using namespace esphome::esp32_camera;
+          if      (x == "Negative")   id(cam).set_special_effect(ESP32_SPECIAL_EFFECT_NEGATIVE);
+          else if (x == "Grayscale")  id(cam).set_special_effect(ESP32_SPECIAL_EFFECT_GRAYSCALE);
+          else if (x == "Red tint")   id(cam).set_special_effect(ESP32_SPECIAL_EFFECT_RED_TINT);
+          else if (x == "Green tint") id(cam).set_special_effect(ESP32_SPECIAL_EFFECT_GREEN_TINT);
+          else if (x == "Blue tint")  id(cam).set_special_effect(ESP32_SPECIAL_EFFECT_BLUE_TINT);
+          else if (x == "Sepia")      id(cam).set_special_effect(ESP32_SPECIAL_EFFECT_SEPIA);
+          else                          id(cam).set_special_effect(ESP32_SPECIAL_EFFECT_NONE);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera White Balance"
+    optimistic: true
+    restore_value: true
+    initial_option: "Auto"
+    options: ["Auto", "Sunny", "Cloudy", "Office", "Home"]
+    set_action:
+      - lambda: |-
+          using namespace esphome::esp32_camera;
+          if      (x == "Sunny")  id(cam).set_wb_mode(ESP32_WB_MODE_SUNNY);
+          else if (x == "Cloudy") id(cam).set_wb_mode(ESP32_WB_MODE_CLOUDY);
+          else if (x == "Office") id(cam).set_wb_mode(ESP32_WB_MODE_OFFICE);
+          else if (x == "Home")   id(cam).set_wb_mode(ESP32_WB_MODE_HOME);
+          else                     id(cam).set_wb_mode(ESP32_WB_MODE_AUTO);
+          id(cam).update_camera_parameters();
+  - platform: template
+    name: "Camera Gain Ceiling"
+    optimistic: true
+    restore_value: true
+    initial_option: "8x"
+    options: ["2x", "4x", "8x", "16x", "32x", "64x", "128x"]
+    set_action:
+      - lambda: |-
+          using namespace esphome::esp32_camera;
+          if      (x == "4x")   id(cam).set_agc_gain_ceiling(ESP32_GAINCEILING_4X);
+          else if (x == "8x")   id(cam).set_agc_gain_ceiling(ESP32_GAINCEILING_8X);
+          else if (x == "16x")  id(cam).set_agc_gain_ceiling(ESP32_GAINCEILING_16X);
+          else if (x == "32x")  id(cam).set_agc_gain_ceiling(ESP32_GAINCEILING_32X);
+          else if (x == "64x")  id(cam).set_agc_gain_ceiling(ESP32_GAINCEILING_64X);
+          else if (x == "128x") id(cam).set_agc_gain_ceiling(ESP32_GAINCEILING_128X);
+          else                   id(cam).set_agc_gain_ceiling(ESP32_GAINCEILING_2X);
+          id(cam).update_camera_parameters();
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+  - platform: template
+    name: "microSD Size"
+    unit_of_measurement: "MB"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      if (!id(sd_snapshot_component).mount()) return NAN;
+      return (float) id(sd_snapshot_component).card_size_mb();
+  - platform: template
+    name: "microSD Free"
+    unit_of_measurement: "MB"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      if (!id(sd_snapshot_component).mount()) return NAN;
+      return (float) id(sd_snapshot_component).free_mb();
+  - platform: template
+    name: "microSD Saved Images"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: 'return (float) id(sd_snapshot_component).saved_images();'
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    mac_address:
+      name: "MAC Address"
+  - platform: template
+    name: "microSD Status"
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: |-
+      if (id(sd_snapshot_component).mount()) return {"mounted"};
+      return {id(sd_snapshot_component).last_error().c_str()};
+  - platform: template
+    name: "microSD Last File"
+    entity_category: diagnostic
+    update_interval: 15s
+    lambda: 'return {id(sd_snapshot_component).last_path().c_str()};'
+  - platform: template
+    name: "Camera Sensor PID"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      sensor_t *s = esp_camera_sensor_get();
+      if (s == nullptr) return {"not ready"};
+      char buf[24];
+      snprintf(buf, sizeof(buf), "PID 0x%04X", (unsigned) s->id.PID);
+      return {buf};
