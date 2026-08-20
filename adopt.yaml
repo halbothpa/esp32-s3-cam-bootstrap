@@ -1,4 +1,5 @@
-# Generated locally in your browser. This file contains key names only.
+# Public, token-free adoption configuration.
+# Secret VALUES are resolved only by the user's local ESPHome instance.
 substitutions:
   device_name: esp32-s3-cam
   friendly_name: ESP32-S3 Camera
@@ -9,22 +10,18 @@ esphome:
   min_version: 2026.7.4
 
 packages:
-  private_camera:
-    url: https://github.com/halbothpa/esp32-s3-cam-esphome.git
-    ref: stable
+  camera:
+    url: https://github.com/halbothpa/esp32-s3-cam-bootstrap.git
+    ref: main
     files:
       - packages/camera.yaml
-    username: !secret esp32_s3_cam_github_username
-    password: !secret esp32_s3_cam_github_token
     refresh: 1d
 
 external_components:
   - source:
       type: git
-      url: https://github.com/halbothpa/esp32-s3-cam-esphome.git
-      ref: stable
-      username: !secret esp32_s3_cam_github_username
-      password: !secret esp32_s3_cam_github_token
+      url: https://github.com/halbothpa/esp32-s3-cam-bootstrap.git
+      ref: main
     components:
       - sd_snapshot
     refresh: 1d
