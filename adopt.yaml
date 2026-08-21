@@ -1,8 +1,35 @@
-# Public, token-free adoption configuration.
-# Secret VALUES are resolved only by the user's local ESPHome instance.
+# ESP32-S3-CAM adopted configuration.
+# Hardware pins are intentionally visible here so they can be changed directly
+# in the ESPHome dashboard without editing the shared package.
+
 substitutions:
   device_name: esp32-s3-cam
   friendly_name: ESP32-S3 Camera
+
+  # Camera DVP pinout. Current default matches the common ESP32-S3-CAM/
+  # ESP32-S3-EYE style N16R8 boards. Change here if your PCB differs.
+  cam_sda_pin: GPIO4
+  cam_scl_pin: GPIO5
+  cam_vsync_pin: GPIO6
+  cam_href_pin: GPIO7
+  cam_xclk_pin: GPIO15
+  cam_pclk_pin: GPIO13
+  cam_d0_pin: GPIO11
+  cam_d1_pin: GPIO9
+  cam_d2_pin: GPIO8
+  cam_d3_pin: GPIO10
+  cam_d4_pin: GPIO12
+  cam_d5_pin: GPIO18
+  cam_d6_pin: GPIO17
+  cam_d7_pin: GPIO16
+
+  # White camera flash LED on this board variant. GPIO2 is only the small
+  # status LED. The photographed ESP32-S3-CAM variant is treated as the
+  # GPIO3-flash variant; change this one value if continuity testing says otherwise.
+  camera_flash_pin: GPIO3
+
+  # Reserved future PIR/radar input.
+  motion_pin: GPIO14
 
 esphome:
   name: ${device_name}
@@ -25,6 +52,47 @@ external_components:
     components:
       - sd_snapshot
     refresh: 1d
+
+# Explicit local hardware overrides. These entries are merged into the IDs from
+# packages/camera.yaml and deliberately keep the complete camera pin mapping in
+# the editable Home Assistant ESPHome YAML.
+i2c:
+  - id: !extend camera_i2c
+    sda: ${cam_sda_pin}
+    scl: ${cam_scl_pin}
+    scan: true
+    frequency: 200kHz
+
+esp32_camera:
+  - id: !extend cam
+    external_clock:
+      pin: ${cam_xclk_pin}
+      frequency: 20MHz
+    data_pins:
+      - ${cam_d0_pin}
+      - ${cam_d1_pin}
+      - ${cam_d2_pin}
+      - ${cam_d3_pin}
+      - ${cam_d4_pin}
+      - ${cam_d5_pin}
+      - ${cam_d6_pin}
+      - ${cam_d7_pin}
+    vsync_pin: ${cam_vsync_pin}
+    href_pin: ${cam_href_pin}
+    pixel_clock_pin: ${cam_pclk_pin}
+
+output:
+  - id: !extend camera_led_pwm
+    pin: ${camera_flash_pin}
+
+binary_sensor:
+  - id: !extend motion_trigger
+    pin:
+      number: ${motion_pin}
+      mode:
+        input: true
+        pulldown: true
+      inverted: false
 
 api:
   encryption:
