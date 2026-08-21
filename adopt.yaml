@@ -53,9 +53,9 @@ external_components:
       - sd_snapshot
     refresh: 1d
 
-# Explicit local hardware overrides. These entries are merged into the IDs from
-# packages/camera.yaml and deliberately keep the complete camera pin mapping in
-# the editable Home Assistant ESPHome YAML.
+# Explicit local hardware overrides. These entries are merged into the package
+# and deliberately keep the complete camera pin mapping visible/editable in the
+# Home Assistant ESPHome YAML.
 i2c:
   - id: !extend camera_i2c
     sda: ${cam_sda_pin}
@@ -63,23 +63,24 @@ i2c:
     scan: true
     frequency: 200kHz
 
+# esp32_camera is a singleton mapping, so normal package dictionary merging
+# overrides the hardware fields below while retaining the remaining settings.
 esp32_camera:
-  - id: !extend cam
-    external_clock:
-      pin: ${cam_xclk_pin}
-      frequency: 20MHz
-    data_pins:
-      - ${cam_d0_pin}
-      - ${cam_d1_pin}
-      - ${cam_d2_pin}
-      - ${cam_d3_pin}
-      - ${cam_d4_pin}
-      - ${cam_d5_pin}
-      - ${cam_d6_pin}
-      - ${cam_d7_pin}
-    vsync_pin: ${cam_vsync_pin}
-    href_pin: ${cam_href_pin}
-    pixel_clock_pin: ${cam_pclk_pin}
+  external_clock:
+    pin: ${cam_xclk_pin}
+    frequency: 20MHz
+  data_pins:
+    - ${cam_d0_pin}
+    - ${cam_d1_pin}
+    - ${cam_d2_pin}
+    - ${cam_d3_pin}
+    - ${cam_d4_pin}
+    - ${cam_d5_pin}
+    - ${cam_d6_pin}
+    - ${cam_d7_pin}
+  vsync_pin: ${cam_vsync_pin}
+  href_pin: ${cam_href_pin}
+  pixel_clock_pin: ${cam_pclk_pin}
 
 output:
   - id: !extend camera_led_pwm
